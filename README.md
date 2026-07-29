@@ -1,147 +1,355 @@
 # cronhub
 
-A reliable, cross-platform cron alternative. cronhub is an always-running
-scheduler daemon that fires jobs on time, **logs every run** (exit code, stdout,
-stderr, duration), **survives restarts**, and **registers with your OS's existing
-service manager** (systemd / launchd / Windows SCM) so it comes back on boot.
-Classic crontabs import and run unchanged.
+cronhub runs scheduled jobs. It's meant to replace cron for people who are tired
+of cron's two biggest problems: you can't read the schedule syntax, and when a
+job fails at 3am, cron tells you nothing.
 
-cron fails silently. cronhub doesn't.
+cronhub fixes both. You can write schedules in plain words ("every monday at
+9am"), and every run is recorded — exit code, output, how long it took — so you
+can actually see what happened. It runs on macOS, Linux, and Windows from a
+single binary, and it can install itself as a proper background service that
+survives reboots.
 
-## Status
+If you already have a crontab, you can import it and keep going without rewriting
+anything.
 
-v1 skeleton. The architecture is complete and every seam has one working
-implementation. See [ARCHITECTURE.md](./ARCHITECTURE.md) for the full design,
-the port/seam model, and the scope boundary.
+## Contents
 
-## Quick start
+- [Install](#install)
+- [First run](#first-run)
+- [Writing schedules](#writing-schedules)
+- [The config file](#the-config-file)
+- [Notifications](#notifications)
+- [Running as a background service](#running-as-a-background-service)
+- [All commands](#all-commands)
+- [Where things live](#where-things-live)
+- [How it's built](#how-its-built)
+- [Contributing](#contributing)
+- [License](#license)
+
+## Install
+
+You need Go 1.22 or newer. Build the binary:
 
 ```sh
+git clone https://github.com/aelaboussi/cronhub.git
+cd cronhub
 go build -o cronhub ./cmd/cronhub
 ```
 
-**New user** — create a starter config (written to the OS-native location
-automatically; you don't need to know the path):
+That produces a single `cronhub` binary in the current folder. Move it somewhere
+on your PATH if you want to run it from anywhere:
 
 ```sh
-./cronhub init              # writes a commented cronhub.toml, tells you where
-# edit the generated file, then:
-./cronhub list              # confirm your jobs
-./cronhub run               # run the scheduler in the foreground (Ctrl+C to stop)
+sudo mv cronhub /usr/local/bin/
 ```
 
-**Existing cron user** — import your crontab and you're done:
+## First run
+
+If you're starting fresh, create a config file:
 
 ```sh
-crontab -l | ./cronhub import-crontab -     # import from stdin
-# or
-./cronhub import-crontab /path/to/crontab
-./cronhub list
-./cronhub run
+cronhub init
 ```
 
-**Run as a real OS service** (survives reboots), once you're happy:
+This writes a starter config to the right place for your operating system (see
+[Where things live](#where-things-live)) and tells you the path. Open that file,
+add your jobs, then check they look right:
 
 ```sh
-./cronhub install           # user-level, no root
-./cronhub install --system  # system-level, needs root
-./cronhub start | stop | status
+cronhub list
 ```
 
-Any command accepts `--config PATH` to use a specific config instead of the
-default location. `init` and `import-crontab` accept `--force` to overwrite an
-existing config.
+`list` shows each job, its schedule, and the next time it will run — which is a
+quick way to confirm you wrote the schedule correctly.
 
-### Where the config lives
+To start the scheduler in your terminal:
 
-`cronhub init` writes to the OS-native config directory, so you never have to
-create folders or copy files by hand:
+```sh
+cronhub run
+```
 
-| OS      | Default config path                                      |
-|---------|----------------------------------------------------------|
-| macOS   | `~/Library/Application Support/cronhub/cronhub.toml`     |
-| Linux   | `~/.config/cronhub/cronhub.toml`                         |
-| Windows | `%AppData%\cronhub\cronhub.toml`                         |
+It stays running and fires jobs on schedule, printing a line each time a job
+runs. Press Ctrl+C to stop. This is the right mode while you're setting things
+up. When you're happy, install it as a background service (further down) so it
+keeps running without a terminal open.
 
-## Example config (`cronhub.toml`)
+If you already use cron, skip `init` and import your existing crontab instead:
+
+```sh
+crontab -l | cronhub import-crontab -
+```
+
+That reads your current crontab, converts every job into a cronhub job, and
+writes the config for you. Review it with `cronhub list` and you're done.
+
+## Writing schedules
+
+cronhub understands two ways of writing a schedule. You can mix both in the same
+config — use whichever is clearer for each job.
+
+### Plain words
+
+These are the readable forms. They're a fixed set — cronhub isn't guessing at
+free-form English, it understands exactly these patterns, so they always behave
+the same way:
+
+```
+every 30 seconds
+every 5 minutes
+every 2 hours
+hourly
+daily
+weekly
+monthly
+yearly
+
+every day at 9am
+every day at 21:00
+every day at noon
+every day at midnight
+
+every monday at 9am
+every weekday at 8:30am          (Monday through Friday)
+every weekend at 10am            (Saturday and Sunday)
+every mon,wed,fri at 6pm
+
+every month on the 1st at midnight
+every month on the 15th at 9am
+```
+
+Times can be written as `9am`, `9:30am`, `9pm`, `21:00`, `noon`, or `midnight`.
+Days can be full names (`monday`) or short (`mon`).
+
+If you write something cronhub doesn't recognize, it won't run the job — it will
+stop and print the full list of forms it does understand, so you can fix it.
+
+### Classic cron
+
+If you know cron syntax, or you need something the plain-word forms can't
+express (complex ranges, specific month/day combinations), write a standard
+five-field cron expression:
+
+```
+*/15 * * * *        every 15 minutes
+0 9 * * 1           09:00 every Monday
+30 2 1 * *          02:30 on the 1st of every month
+```
+
+cronhub decides which kind you wrote by looking at the first character: if it
+starts with a letter it's treated as plain words, otherwise as cron. You never
+have to tell it which.
+
+## The config file
+
+The config is a TOML file. A minimal job needs three things: a name, a schedule,
+and a command.
 
 ```toml
 version = 1
 
-[defaults]                     # optional machine-wide overrides
-timezone = "Africa/Casablanca"
-
 [[job]]
-name     = "heartbeat"
-schedule = "* * * * *"         # standard cron syntax
-command  = "echo alive"
-
-[[job]]
-name       = "backup"
-schedule   = "0 3 * * *"
-command    = "/opt/backup.sh"
-on_overlap = "skip"            # skip | queue | parallel | kill
-on_missed  = "skip"            # skip | catch_up_once | catch_up_all
-timeout    = "30m"
-notify     = ["log"]
+name     = "backup"
+schedule = "every day at 3am"
+command  = "/opt/backup.sh"
 ```
 
-A job needs only `name`, `schedule`, and `command`; everything else falls back to
-documented defaults.
+`version` is required and should stay `1` for now; it lets future versions of
+cronhub upgrade old configs safely.
 
-## Notifiers (how cronhub tells you what happened)
+### All the job fields
 
-Every job logs by default. Beyond that, you declare **notifier instances** and
-reference them per job. The built-in `log` notifier is always available; other
-notifiers are declared in config:
+Only `name`, `schedule`, and `command` are required. Everything else is
+optional and has a sensible default:
 
 ```toml
-[[notifier]]
-name          = "alerts"
-type          = "webhook"                  # POSTs the job outcome as JSON
-url           = "https://hooks.slack.com/services/..."
-failures_only = true                       # only fire when a job fails
-
 [[job]]
-name     = "nightly-backup"
-schedule = "0 3 * * *"
-command  = "/opt/backup.sh"
-notify   = ["log", "alerts"]               # log every run, webhook on failure
+name       = "backup"
+schedule   = "every day at 3am"
+command    = "/opt/backup.sh"
+
+on_overlap = "skip"        # what to do if the previous run is still going
+                           # when the next one is due. default: "skip".
+                           # other values (queue, parallel, kill) are planned
+                           # but not implemented yet.
+
+on_missed  = "skip"        # what to do about runs that were missed while the
+                           # machine was off or asleep. default: "skip"
+                           # (missed runs are not replayed). catch-up options
+                           # are planned but not implemented yet.
+
+timeout    = "30m"         # kill the job if it runs longer than this.
+                           # accepts things like "30s", "10m", "2h".
+                           # default: no timeout.
+
+timezone   = "Africa/Casablanca"   # which timezone the schedule is in.
+                           # any IANA name. default: "UTC".
+
+notify     = ["log"]       # where to send the result. see Notifications below.
+                           # default: ["log"].
 ```
 
-A job that references an undeclared notifier is a hard config error — cronhub
-tells you before it starts, rather than silently dropping notifications.
+### Shared defaults
 
-### Adding a new notifier type (the extension story)
+If several jobs share the same settings, put them once in a `[defaults]`
+section. Any job can still override them.
 
-This is the heart of cronhub's design. A new notifier is a ~40-line file
-implementing one interface, plus one line of wiring:
+```toml
+version = 1
 
-1. Create `internal/notifier/yours.go` implementing `ports.Notifier`
-   (`Name() string` and `Notify(ports.NotifyEvent) error`). It carries its own
-   config in its struct.
-2. Add a `case "yourtype":` in `buildEngine` (main.go) that constructs it from
-   its config declaration.
-3. Add its type + any required fields to config validation in `LoadConfig`.
+[defaults]
+timezone = "Africa/Casablanca"
+notify   = ["log"]
 
-The core engine is never touched. See `internal/notifier/webhook.go` as the
-worked example. Slack/Discord/custom endpoints already work today via `webhook`.
+[[job]]
+name     = "backup"
+schedule = "every day at 3am"
+command  = "/opt/backup.sh"
+# inherits timezone and notify from defaults
 
-## Design in one sentence
+[[job]]
+name     = "report"
+schedule = "every monday at 8am"
+command  = "/opt/report.sh"
+timezone = "UTC"           # overrides the default just for this job
+```
 
-The core engine depends only on interfaces (ports); each port has exactly one v1
-implementation and is independently swappable, so new schedule syntaxes, notifiers,
-executors, stores, and OS service adapters are added as new files without touching
-the core. Read [ARCHITECTURE.md](./ARCHITECTURE.md).
+The order settings are applied: built-in defaults first, then your `[defaults]`
+section, then each job's own fields. The most specific one wins.
+
+## Notifications
+
+Every job writes a line to the log when it runs. That's the built-in `log`
+notifier and it's always on unless you change `notify`.
+
+If you want to be told about failures somewhere other than the log — Slack, a
+webhook, your own endpoint — declare a notifier and point jobs at it by name.
+
+```toml
+version = 1
+
+[[notifier]]
+name          = "alerts"
+type          = "webhook"
+url           = "https://hooks.slack.com/services/your/webhook/url"
+failures_only = true        # only send when a job fails. recommended, unless
+                            # you want a message on every single successful run.
+
+[[job]]
+name     = "backup"
+schedule = "every day at 3am"
+command  = "/opt/backup.sh"
+notify   = ["log", "alerts"]   # write to the log every time, and hit the
+                               # webhook when it fails
+```
+
+The webhook sends a small JSON body with the job name, whether it succeeded, the
+exit code, how long it took, and any output. Slack, Discord, and most services
+accept this format directly.
+
+If a job's `notify` list names a notifier you didn't declare, cronhub refuses to
+start and tells you which one is missing — it won't quietly drop your alerts.
+
+## Running as a background service
+
+`cronhub run` only runs while your terminal is open. To keep jobs running all the
+time — including after a reboot — install cronhub as a service. It registers
+with whatever your operating system already uses (systemd on Linux, launchd on
+macOS, the Service Control Manager on Windows). cronhub does not replace those;
+it just registers itself with them.
+
+```sh
+cronhub install        # install as a service for your user (no admin needed)
+cronhub start          # start it
+cronhub status         # check whether it's running
+cronhub stop           # stop it
+cronhub uninstall      # remove it
+```
+
+By default it installs at the user level, which needs no admin rights and runs
+while you're logged in. If you need it to run at boot regardless of who's logged
+in, add `--system` (this needs admin/root):
+
+```sh
+sudo cronhub install --system
+```
+
+## All commands
+
+```
+cronhub init                    create a starter config file
+cronhub import-crontab FILE     import an existing crontab (use "-" for stdin)
+cronhub list                    show all jobs and their next run time
+cronhub run                     run the scheduler in the foreground
+cronhub install                 register as a background service
+cronhub uninstall               remove the background service
+cronhub start                   start the installed service
+cronhub stop                    stop the installed service
+cronhub status                  show whether the service is running
+```
+
+Flags that apply to most commands:
+
+```
+--config PATH     use a specific config file instead of the default location
+--system          for install/uninstall/start/stop/status: act on the
+                  system-level service instead of the user-level one
+--force           for init/import-crontab: overwrite an existing config
+```
+
+## Where things live
+
+`init` and `import-crontab` write to your operating system's standard config
+location, so you don't have to create folders or remember paths:
+
+| OS      | Config and database                                       |
+|---------|-----------------------------------------------------------|
+| macOS   | `~/Library/Application Support/cronhub/`                   |
+| Linux   | `~/.config/cronhub/`                                       |
+| Windows | `%AppData%\cronhub\`                                       |
+
+That folder holds two files: `cronhub.toml` (your jobs) and `cronhub.db` (the
+run history and saved job state — an SQLite database). If you ever want a clean
+slate, deleting `cronhub.db` is safe; it gets rebuilt from your config.
+
+## How it's built
+
+The short version: there's a small core that owns the scheduling loop, and
+everything the core needs — how to read a schedule, how to run a command, where
+to store state, how to send a notification, how to register as a service — is
+behind an interface. Each interface has one implementation today and can get
+more later without touching the core.
+
+That's what makes cronhub extensible: adding a new notification type, a new
+schedule format, or a new way of running commands is a new file, not a rewrite.
+The full explanation, including every interface and the reasoning behind the
+design, is in [ARCHITECTURE.md](./ARCHITECTURE.md).
 
 ## Contributing
 
-Each port is an independent contribution target. Good first contributions: a Slack
-or email notifier (~30 lines against `ports.Notifier`), a human-readable schedule
-parser, or refinements to the Windows executor's process-tree kill. The rule:
-depend on the port interface, never on the core's internals, and ship with a
-documented default.
+Contributions are welcome. The easiest places to start are the parts that are
+designed to grow:
+
+- **A new notification type.** Look at `internal/notifier/webhook.go` — it's
+  about 40 lines. Email, Discord, desktop notifications, and others would all
+  follow the same shape: implement two methods, add one line of wiring, add it
+  to the config validation. The core doesn't change.
+- **More schedule phrases.** `internal/schedule/human.go` holds the readable
+  syntax. New patterns go there.
+- **The Windows command runner.** `internal/executor/executor_windows.go` kills
+  a job's process tree with `taskkill`. A proper Job Object would be more
+  reliable and is a good, self-contained improvement.
+
+Whatever you add, the rule is the same: depend on the interface, not on the
+core's internals, and give any new behavior a documented default.
+
+Run the tests before opening a pull request:
+
+```sh
+go test ./...
+```
 
 ## License
 
-TBD.
+MIT — see [LICENSE](./LICENSE). Free to use, change, and build on, including for
+commercial work. Provided as-is, with no warranty.

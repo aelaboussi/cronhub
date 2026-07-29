@@ -6,7 +6,7 @@ import (
 )
 
 // ScheduleParser turns a raw spec string into something that can compute the
-// next fire time. The core never knows the syntax. v1 impl: cron syntax.
+// next fire time. The core never knows the syntax. The two implementations (cron + readable words) live in the schedule package.
 type ScheduleParser interface {
 	Parse(spec string) (Schedule, error)
 }
@@ -18,7 +18,6 @@ type Schedule interface {
 
 // TriggerPolicy decides, for a scheduled time that has arrived (or elapsed
 // while the daemon was down), whether to run now, skip, or catch up.
-// v1 impl: skip missed.
 type TriggerPolicy interface {
 	Decide(scheduledFor, now, lastRun time.Time) TriggerDecision
 }
@@ -32,7 +31,7 @@ const (
 )
 
 // OverlapPolicy decides what to do when a job is due while its previous run is
-// still active. v1 impl: skip.
+// still active.
 type OverlapPolicy interface {
 	OnOverlap(job Job) OverlapDecision
 }
@@ -55,7 +54,7 @@ type Executor interface {
 	Run(ctx context.Context, job Job) RunResult
 }
 
-// Store persists job definitions and run history. Transactional. v1 impl: SQLite.
+// Store persists job definitions and run history. Transactional. Backed by SQLite today.
 type Store interface {
 	SaveJob(job Job) error
 	LoadJobs() ([]Job, error)
@@ -64,14 +63,14 @@ type Store interface {
 	Close() error
 }
 
-// Notifier reports a run outcome to the user. v1 impl: log.
+// Notifier reports a run outcome. The log notifier is always available; others are declared in config.
 type Notifier interface {
 	Name() string
 	Notify(ev NotifyEvent) error
 }
 
 // ServiceAdapter registers the daemon with the OS's existing service manager.
-// cronhub is a client of systemd/launchd/SCM, never a replacement. v1 impl wraps
+// cronhub is a client of systemd/launchd/SCM, never a replacement. Wraps
 // kardianos/service and defaults to user-level registration.
 type ServiceAdapter interface {
 	Install() error

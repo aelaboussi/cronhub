@@ -1,221 +1,210 @@
-# cronhub — Architecture
+# How cronhub is built
 
-A cross-platform cron alternative: an always-running scheduler daemon that fires
-jobs reliably, logs every run, survives restarts, and can register itself with
-the operating system's existing service manager. Standard crontabs import and run
-unchanged.
+This explains the design of cronhub and the reasoning behind it. If you just want
+to use the tool, the README covers that. Read this if you want to change cronhub,
+add to it, or understand why it's put together the way it is.
 
-This document is the contract the code conforms to. It defines the seams (ports),
-their v1 default implementations, the config model, and — deliberately — the scope
-boundary of v1. Read the "Scope discipline" section before adding anything.
+## The one idea
 
----
+There's a small core that runs the scheduling loop. Everything the core needs
+from the outside world is defined as an interface: how to read a schedule, how to
+run a command, where to keep state, how to send a notification, how to register
+with the operating system. The core only ever talks to those interfaces. It never
+directly refers to SQLite, systemd, cron syntax, or a shell.
 
-## 1. Design principles
+Each interface has one working implementation today. When we want a second way of
+doing something — a new notification channel, a new schedule format — we write
+another implementation of the same interface and select it. The core doesn't
+change. That's the whole point: new features are new files, not rewrites.
 
-1. **The core depends on abstractions, never on concretes.** The engine knows
-   about interfaces (ports). It never imports SQLite, systemd, cron syntax, or a
-   shell directly. Concrete implementations are constructed at startup and injected.
-   This one rule is what makes every future addition a new file instead of a rewrite.
+We call these interfaces "ports."
 
-2. **Every behavioral decision is a policy with a documented default.** "What happens
-   when a run overlaps the next trigger?" is not an `if` buried in the loop — it is a
-   named, swappable policy. Silence erodes trust; a documented default is a promise.
+## Principles
 
-3. **Beginner touches nothing; expert overrides everything.** Config resolves in
-   layers. An empty config runs correctly on compiled-in defaults. Each layer below
-   overrides the one above:
-   - compiled-in defaults
-   - global config file
-   - per-job overrides
-   - (later) env vars / CLI flags
+**The core depends on interfaces, not on concrete code.** The scheduling loop is
+handed its dependencies at startup and uses them through their interfaces. If the
+core ever imports a specific database or a specific service manager directly, that
+rule is broken and the design starts to rot. Keeping the core ignorant of the
+concretes is what keeps everything else swappable.
 
-4. **Fail loud at load time, never guess at run time.** A malformed config is a hard
-   error before the daemon starts, not a silently-wrong schedule at 3am.
+**Every behavioral decision is a named choice with a documented default.** "What
+happens if a job is still running when it's due again?" is not an `if` statement
+buried somewhere. It's a policy with a name (`on_overlap`) and a stated default
+(skip). A user who does nothing gets sensible behavior; a user who wants something
+else changes one line. Undocumented behavior is how a tool loses people's trust.
 
-5. **Draw every seam in v1. Implement exactly one impl per seam in v1.** The interfaces
-   are the architecture and they are cheap. The extra implementations are the roadmap,
-   not the release. Do not build impl #2 of anything until v1 has shipped and a real
-   user has asked.
+**A beginner should be able to ignore almost everything.** An empty-ish config
+runs correctly because every optional setting has a built-in default. Settings are
+resolved in layers: built-in defaults, then the config's `[defaults]` section,
+then each job's own fields. The most specific value wins. So a three-line job
+works, and a job that overrides ten things also works.
 
-6. **Use the OS's existing service manager. Never build one.** cronhub is a *client*
-   of systemd / launchd / Windows SCM, not a competitor. A service adapter's entire
-   job is: emit the correct config file for the platform and run one register command.
+**Fail loudly, and early.** A bad schedule, an unknown setting, a job pointing at
+a notifier that doesn't exist — all of these stop cronhub before it starts, with a
+clear message. The alternative (starting up and then silently doing the wrong
+thing at 3am) is exactly the cron behavior we're trying to get away from.
 
----
+**Ship one implementation per port; don't build the second one until it's
+needed.** The interfaces are cheap and worth defining up front. The extra
+implementations are a roadmap, not a to-do list. Building a container-based
+command runner or a Postgres backend before anyone has asked is how a solo project
+stalls.
 
-## 2. The relationship between the three parts
+**Use the operating system's service manager; never write one.** systemd, launchd,
+and the Windows Service Control Manager already exist and already handle starting
+things at boot and restarting them on crash. cronhub registers with them. Building
+our own would mean replacing part of the operating system, which is both enormous
+and pointless.
 
-```
-Project side            Engine (daemon)              System service
-config + CLI    --->    always running        <---   systemd / launchd / SCM
-declares jobs           fires, logs, persists         keeps engine alive
-                             |
-                             v
-                         Disk state (survives restart)
-```
+## The three pieces
 
-- **Project side** declares jobs (a committed config file + CLI). The project may
-  then be down; irrelevant — the engine is a separate process.
-- **Engine** is the always-on daemon. It owns the tick loop and fires jobs. It needs
-  the system service to stay alive across reboots and crashes. Without that, it's a toy.
-- **System service** is the OS's existing supervisor. cronhub registers with it.
-- **Disk state** is why cronhub is not a discover-then-delete tool: jobs and run
-  history survive restarts.
+cronhub has three parts, and they're deliberately separate.
 
----
+The **engine** is a long-running process. It holds the jobs and fires them on
+schedule. As long as it's running, jobs run — whether or not any particular
+application on the machine is up.
 
-## 3. The ports (seams)
+The **service registration** is what keeps the engine alive across reboots and
+crashes. It's a thin adapter that tells the operating system's service manager to
+supervise the engine. Without it, the engine only runs while you keep a terminal
+open, which is fine for testing and useless in production.
 
-The core engine depends on these seven interfaces and nothing else concrete. Each
-has exactly one v1 implementation. The "later" column is roadmap, not v1 work.
+The **project side** is how jobs get declared: a config file (and the commands
+that read and write it). The application whose jobs these are doesn't need to be
+running for the jobs to fire — it just declares them once. The engine, running
+separately, does the actual work.
 
-| Port              | Question it answers                          | v1 default impl              | Later (community / future phases)          |
-|-------------------|----------------------------------------------|------------------------------|--------------------------------------------|
-| Schedule parser   | How does a user express *when*?              | standard cron syntax         | human syntax, intervals, sunrise/sunset    |
-| Trigger policy    | Machine was asleep — catch up or skip?       | skip missed                  | catch-up-once, catch-up-all                |
-| Overlap policy    | Previous run still going at next trigger?    | no overlap (skip)            | queue, kill-and-restart, allow-parallel    |
-| Executor          | How does a job actually run?                 | local shell (build-tagged)   | container, SSH, HTTP call                  |
-| Store             | Where does state live across restarts?       | SQLite (single file)         | Postgres (multi-node)                      |
-| Notifier          | How does the user learn a job failed?        | log only                     | email, Slack, webhook, desktop             |
-| Service adapter   | How does the OS keep the daemon alive?       | kardianos/service (tri-OS)   | hand-rolled per-OS refinements             |
-| Config loader     | What file format defines jobs?               | TOML                         | YAML, DB-backed, API-driven                |
+This separation is the answer to "if my app is down, do my jobs stop?" They don't,
+because the engine is not your app. It's its own process, kept alive by the
+service manager.
 
-### Port contracts (conceptual — Go signatures live in the skeleton)
+## The ports
 
-- **Schedule parser:** `Parse(spec string) (Schedule, error)` where
-  `Schedule.Next(after time.Time) time.Time`. The core only asks "when is the next
-  fire after T?" It knows nothing about cron syntax.
+The core depends on these interfaces and nothing else concrete. Each has one
+implementation today; the last column is what could be added later against the
+same interface, without touching the core.
 
-- **Trigger policy:** given `(scheduledFor, now, lastRun)` returns a decision:
-  run now / skip / (later) catch-up. Selected per-job via config, default skip-missed.
+| Port            | What it decides                          | Today                        | Could be added later                     |
+|-----------------|------------------------------------------|------------------------------|------------------------------------------|
+| Schedule parser | How a schedule is written                | cron syntax + readable words | more readable phrases; one-shot times    |
+| Trigger policy  | Whether a due (or missed) run happens    | skip missed runs             | replay missed runs (catch-up)            |
+| Overlap policy  | What to do if the last run is still going| skip the new run             | queue, run in parallel, kill the old one |
+| Executor        | How a command actually runs              | local shell                  | containers, SSH, HTTP calls              |
+| Store           | Where jobs and history are kept          | SQLite (one file)            | Postgres for multiple machines           |
+| Notifier        | How results are reported                 | log; webhook                 | email, Slack, Discord, desktop           |
+| Service adapter | How the OS keeps the engine alive        | systemd / launchd / Windows  | refinements per platform                 |
+| Config loader   | What the config file looks like          | TOML                         | other formats; config from a database    |
 
-- **Overlap policy:** consulted when a job is due but its previous run is still active.
-  Returns skip / queue / kill-previous / allow-parallel. Default skip.
+A note on the schedule parser, since it has an unusual shape: there are actually
+two implementations (one for cron syntax, one for the readable words) plus a small
+router that picks between them based on the first character of the schedule. The
+core still sees a single schedule-parser interface and is unaware of the split.
+This is the port design working exactly as intended — two implementations behind
+one interface, chosen at the edge.
 
-- **Executor:** `Run(ctx, job) (Handle, error)`, `Kill(handle) error`, and result
-  reporting (exit code, captured stdout/stderr, duration). **This is the one seam with
-  genuine per-OS work** — process termination-with-children differs on Unix vs Windows.
-  Signature is OS-agnostic; platform code lives behind build tags
-  (`executor_unix.go` / `executor_windows.go`).
+### What each interface promises
 
-- **Store:** `SaveJob`, `LoadJobs`, `RecordRun`, `ReadHistory`. Transactional. v1 SQLite,
-  single file under the config dir. Swapping to Postgres later is a new impl, not surgery.
+**Schedule parser.** Given a schedule string, return something that can answer
+"when is the next run after this moment?" The core asks that question and nothing
+else. It has no idea whether a cron expression or the phrase "every monday at 9am"
+produced the answer.
 
-- **Notifier:** `Notify(event)` where event describes a run outcome. v1 writes to the log.
+**Trigger policy.** Given a scheduled time, the current time, and when the job last
+ran, decide whether to run now or skip. Today's policy skips anything that was due
+while the engine was down. Replaying missed runs would be a different policy.
 
-- **Service adapter:** `Install`, `Uninstall`, `Start`, `Stop`, `Status`. Wraps
-  `kardianos/service` so the core is not coupled to that library's API. Defaults to
-  **user-level** registration (no root, simplest install); system-level is opt-in.
+**Overlap policy.** When a job comes due but its previous run hasn't finished,
+decide what to do. Today: skip the new run. The other behaviors (queue it, allow
+both, kill the old one) are defined in the interface but not implemented yet.
 
-- **Config loader:** `Load(path) (Config, error)`. Parses a file into in-memory structs.
-  The core sees only structs — never the file format. v1 TOML. TOML is chosen because it
-  is explicitly typed and fails loud: no YAML "Norway problem" (`NO` → false), no
-  base-60 time coercion (`08:00` → 480), no whitespace-significant silent errors —
-  all of which are hazards directly in a scheduler's domain.
+**Executor.** Run a job's command, enforce its timeout, and report back the exit
+code, the output, and how long it took. This is the one port with real
+platform-specific work inside it: stopping a command and everything it spawned is
+genuinely different on Unix (process groups) and Windows (taskkill, and eventually
+a Job Object). The interface hides that; the difference lives in files selected by
+build tag.
 
----
+**Store.** Save and load jobs, record each run, and read back a job's history.
+Today it's a single SQLite file, which needs no setup and no server. The interface
+is small enough that moving to a networked database later is a new implementation,
+not surgery on everything.
 
-## 4. Config model
+**Notifier.** Report the outcome of a run. A job lists the notifiers it wants by
+name. The `log` notifier is always available. Others (currently a webhook) are
+declared in the config and built at startup. Because a notifier carries its own
+settings in its own struct, the interface itself stays tiny: a name and a
+"here's what happened" method.
 
-A job at minimum needs a schedule and a command. Everything else is optional and
-falls back to compiled-in defaults. Conceptual shape (TOML):
+**Service adapter.** Install, start, stop, and check the engine as an operating
+system service. It wraps a library that already knows how to write the correct
+service definition for each platform, so cronhub isn't hand-rolling systemd units
+and launchd plists. It defaults to a per-user service, which needs no admin rights.
 
-```toml
-version = 1                      # schema version — present from day one
+**Config loader.** Read the config file into plain in-memory structures. The core
+only sees those structures, never the file format. We use TOML because it's
+strict: a malformed file is an error, not a silent misreading. (Cron-adjacent
+formats like YAML have a habit of turning `08:00` into a number and `NO` into
+`false` — bad traits for a file that controls when things run.)
 
-[defaults]                       # optional; overrides compiled-in defaults machine-wide
-on_overlap = "skip"
-on_missed  = "skip"
-notify     = ["log"]
-timezone   = "Africa/Casablanca"
+## The config, and how defaults resolve
 
-[[job]]
-name     = "backup"
-schedule = "0 3 * * *"           # required
-command  = "/opt/backup.sh"      # required
-# --- everything below optional; defaults apply if omitted ---
-on_overlap = "skip"              # skip | queue | parallel | kill
-on_missed  = "skip"              # skip | catch_up_once | catch_up_all
-timeout    = "30m"
-notify     = ["log"]             # log | email | slack | webhook
-timezone   = "Africa/Casablanca"
-```
+A job needs a name, a schedule, and a command. Everything else is optional. The
+config file also has an optional `[defaults]` section and optional `[[notifier]]`
+declarations.
 
-- `version` is mandatory and enables painless migration later.
-- A job with only `name`, `schedule`, `command` is valid — a beginner writes three lines.
-- An expert overrides any policy per job.
+Values resolve in three layers, most specific winning:
 
----
+1. Built-in defaults compiled into cronhub.
+2. The config's `[defaults]` section.
+3. Each job's own fields.
 
-## 5. Cross-OS scope in v1
+The config file format is versioned (`version = 1`) from the start, so a future
+release can recognize and migrate an older file instead of misreading it.
 
-cronhub runs on Linux, macOS, and Windows (incl. ARM) from v1. Effort is not uniform:
+## Cross-platform
 
-| Layer                                   | Cross-OS cost                                    |
-|-----------------------------------------|--------------------------------------------------|
-| Core / parser / store / config          | Free — Go compiles native binaries per platform. |
-| Service adapter                         | Low — `kardianos/service` emits the right file.  |
-| Executor: spawn + capture               | Low — `os/exec`.                                 |
-| Executor: kill / timeout **with children** | **Real per-OS work** — build-tagged files.    |
+cronhub builds to a single binary for macOS, Linux, and Windows. Most of the code
+is platform-independent and the Go compiler handles the rest. The two places with
+real per-platform work are:
 
-The last row is the only place genuine cross-OS effort concentrates (process groups
-on Unix vs job objects on Windows; the classic "works on my Linux box, zombies on
-Windows" bug). It is contained entirely within the Executor seam — the core just calls
-`Run` and `Kill`.
+- **The executor**, specifically stopping a running command and its children,
+  which works differently on each OS. This lives in build-tagged files so the rest
+  of the executor stays shared.
+- **The service adapter**, which is handled by a library that emits the right
+  service definition per platform.
 
----
+Everything else — the loop, the parsers, the store, the config — is the same code
+everywhere.
 
-## 6. v1 reliability defaults (the promises)
+## What's intentionally not built yet
 
-These are the documented defaults that make cronhub trustworthy. All are overridable.
+The interfaces above describe more than cronhub currently does. That's on purpose.
+The following are designed for but not implemented, and shouldn't be built until
+there's a real need:
 
-- **Overlap:** if the previous run of a job is still active, skip this trigger.
-- **Missed runs:** if the daemon was down/asleep at a scheduled time, that run is
-  skipped (not replayed) in v1. Catch-up policies are roadmap.
-- **Restart:** on daemon start, state is re-read from disk and the schedule resumes.
-  No job definitions or run history are lost.
-- **Every run is recorded:** exit code, captured stdout/stderr, start time, duration.
-  This is cron's single biggest failure and cronhub's core selling point.
-- **Service:** defaults to user-level registration (runs when the user is logged in,
-  no root). System-level (runs at boot regardless of login, needs root) is opt-in.
+- Replaying missed runs (catch-up).
+- Overlap handling beyond "skip" (queue, parallel, kill).
+- Running commands anywhere but the local machine.
+- Storing state anywhere but the local SQLite file.
+- One-shot schedules ("run once on Monday at 9pm and then stop") — this needs the
+  engine to let a job retire itself, which is real new machinery, so it's its own
+  future feature rather than part of the schedule syntax.
+- A web interface, and multi-machine scheduling.
 
----
+The design being ready for these is not a reason to build them.
 
-## 7. Scope discipline (read before adding anything)
+## Adding to cronhub
 
-**In v1:**
-- Engine + tick loop.
-- One implementation of each of the eight ports above.
-- Layered TOML config with versioned schema.
-- Cross-OS binaries (Linux/macOS/Windows).
-- `cronhub import-crontab` — read an existing crontab and run those jobs unchanged
-  (the zero-friction adoption hook).
-- `cronhub install` / `start` / `stop` / `status` / `list` / `logs`.
+Every port is a place you can extend without touching the core. The pattern is
+always the same: write a new implementation of the interface, add one line that
+constructs it, and add any validation for its config. The core stays as it is.
 
-**Explicitly NOT in v1 (roadmap — do not build until shipped + requested):**
-- Distributed / multi-node scheduling.
-- Web UI.
-- Any second implementation of any port (extra executors, notifiers, stores, parsers).
-- Catch-up / replay policies.
+The best-documented example is the webhook notifier
+(`internal/notifier/webhook.go`) — around 40 lines. A new notification channel
+follows the same three steps. New schedule phrases go in
+`internal/schedule/human.go`. The Windows command-stopping code
+(`internal/executor/executor_windows.go`) is a good self-contained thing to
+harden.
 
-The architecture is *ready* for all of the above because the seams exist. Readiness is
-not a reason to build them. Ship one impl per seam; let real users and contributors
-pull the rest into existence.
-
----
-
-## 8. Contribution surface (open source)
-
-Each port is an independent contribution target — a contributor adds an implementation
-against a stable interface without touching the core:
-
-- New **schedule parsers** (human-readable syntax, intervals).
-- New **notifiers** (Slack, email, webhook, desktop) — ~30 lines each against one interface.
-- New **executors** (container, SSH, HTTP).
-- New **service adapter** refinements per OS.
-- New **config loaders** (YAML).
-- New **stores** (Postgres).
-
-The rule for every contribution: depend on the port interface, never on the core's
-internals, and ship with a documented default behavior.
+The rule for anything new: depend on the interface rather than the core's
+internals, and give any new behavior a clear default.

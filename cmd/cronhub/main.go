@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/aelaboussi/cronhub/internal/config"
 	"github.com/aelaboussi/cronhub/internal/core"
@@ -125,6 +126,15 @@ func buildEngine(cfgPath string) (*core.Engine, ports.Store, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	// Validate every schedule up front so a bad spec fails loud before the
+	// daemon starts, not silently at first tick.
+	parser := schedule.NewAutoParser()
+	for _, j := range cfg.Jobs {
+		if _, perr := parser.Parse(j.Schedule); perr != nil {
+			_ = st.Close()
+			return nil, nil, fmt.Errorf("job %q: %w", j.Name, perr)
+		}
+	}
 	for _, j := range cfg.Jobs {
 		if err := st.SaveJob(j); err != nil {
 			_ = st.Close()
@@ -150,7 +160,7 @@ func buildEngine(cfgPath string) (*core.Engine, ports.Store, error) {
 	}
 
 	deps := core.Deps{
-		Parser:    schedule.NewCronParser(),
+		Parser:    parser,
 		Trigger:   policy.NewSkipMissed(),
 		Overlap:   policy.NewNoOverlap(),
 		Executor:  executor.NewLocal(),
@@ -185,8 +195,17 @@ func mustList(cfgPath string) {
 	if err != nil {
 		dieConfig(err, cfgPath)
 	}
+	parser := schedule.NewAutoParser()
+	now := time.Now()
 	for _, j := range jobs {
-		fmt.Printf("%-20s %-15s %s\n", j.Name, j.Schedule, j.Command)
+		next := "invalid schedule"
+		if sched, perr := parser.Parse(j.Schedule); perr != nil {
+			// Fail loud: a bad schedule is a config error, surfaced by list too.
+			die(fmt.Errorf("job %q: %w", j.Name, perr))
+		} else {
+			next = sched.Next(now).Format("Mon 2006-01-02 15:04")
+		}
+		fmt.Printf("%-20s %-22s next: %s\n", j.Name, j.Schedule, next)
 	}
 }
 
