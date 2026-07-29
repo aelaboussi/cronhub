@@ -1,0 +1,27 @@
+version = 1
+
+[defaults]
+timezone = "Africa/Casablanca"
+notify   = ["log"]
+
+# Declare a notifier instance jobs can reference by name in their `notify` list.
+# The built-in "log" notifier is always available and needs no declaration.
+[[notifier]]
+name          = "alerts"
+type          = "webhook"                 # POSTs job outcome as JSON
+url           = "https://example.com/hook" # Slack/Discord/custom endpoints all work
+failures_only = true                       # only notify when a job fails (recommended)
+
+[[job]]
+name     = "heartbeat"
+schedule = "* * * * *"
+command  = "echo alive"
+
+[[job]]
+name       = "nightly-backup"
+schedule   = "0 3 * * *"
+command    = "/opt/backup.sh"
+on_overlap = "skip"
+on_missed  = "skip"
+timeout    = "30m"
+notify     = ["log", "alerts"]            # logs every run, webhooks on failure
