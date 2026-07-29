@@ -250,6 +250,53 @@ accept this format directly.
 If a job's `notify` list names a notifier you didn't declare, cronhub refuses to
 start and tells you which one is missing — it won't quietly drop your alerts.
 
+## Seeing what happened
+
+cronhub records every run — when it happened, whether it succeeded, how long it
+took, the exit code, and any output. This is the part cron can't do: when a job
+fails overnight, you can actually find out why.
+
+Show a job's recent runs:
+
+```sh
+cronhub history backup
+```
+
+```
+Recent runs of "backup" (newest first):
+
+  #   when                 result   duration   exit
+  1   2026-07-29 07:00:00  ok       120ms      0
+  2   2026-07-29 06:00:00  FAILED   90ms       1
+  3   2026-07-29 05:00:00  ok       110ms      0
+
+See a run's output with: cronhub history backup --run N
+```
+
+Each run has a number. To see the full output of one — including whatever it
+printed to stderr — point at that number:
+
+```sh
+cronhub history backup --run 2
+```
+
+```
+Run #2 of "backup"
+  when:     2026-07-29 06:00:00 UTC
+  result:   FAILED (exit code 1)
+  duration: 90ms
+
+--- stderr ---
+disk full
+```
+
+Show more runs, or only the failures:
+
+```sh
+cronhub history backup --limit 30      # show 30 instead of the default 10
+cronhub history backup --failed        # only runs that failed
+```
+
 ## Running as a background service
 
 `cronhub run` only runs while your terminal is open. To keep jobs running all the
@@ -280,6 +327,7 @@ sudo cronhub install --system
 cronhub init                    create a starter config file
 cronhub import-crontab FILE     import an existing crontab (use "-" for stdin)
 cronhub list                    show all jobs and their next run time
+cronhub history JOB             show recent runs of a job (--limit, --failed, --run)
 cronhub run                     run the scheduler in the foreground
 cronhub install                 register as a background service
 cronhub uninstall               remove the background service

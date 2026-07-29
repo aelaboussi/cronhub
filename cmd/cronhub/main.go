@@ -47,6 +47,9 @@ func main() {
 	cfgPath := fs.String("config", defaultConfigPath(), "path to config file")
 	systemLevel := fs.Bool("system", false, "register as a system service (needs root)")
 	force := fs.Bool("force", false, "overwrite an existing config")
+	limit := fs.Int("limit", 10, "number of runs to show (history)")
+	failed := fs.Bool("failed", false, "show only failed runs (history)")
+	runN := fs.Int("run", 0, "show full details of run number N (history)")
 	// Reorder so flags may appear before OR after positional args (Go's flag
 	// package otherwise stops at the first positional).
 	_ = fs.Parse(reorderArgs(os.Args[2:]))
@@ -60,6 +63,8 @@ func main() {
 		mustRun(*cfgPath)
 	case "list":
 		mustList(*cfgPath)
+	case "history":
+		mustHistory(fs.Arg(0), *limit, *failed, *runN)
 	case "install":
 		mustService(*systemLevel, func(a *svc.Adapter) error { return a.Install() }, "installed")
 	case "uninstall":
@@ -209,6 +214,102 @@ func mustList(cfgPath string) {
 	}
 }
 
+func mustHistory(jobName string, limit int, failedOnly bool, runN int) {
+	if jobName == "" {
+		die(fmt.Errorf("usage: cronhub history <job> [--limit N] [--failed] [--run N]"))
+	}
+	st, err := store.Open(dbPath())
+	if err != nil {
+		die(err)
+	}
+	defer st.Close()
+
+	// Read a bit extra when filtering so --failed still fills the limit.
+	readN := limit
+	if failedOnly {
+		readN = limit * 10
+	}
+	recs, err := st.ReadHistory(jobName, readN)
+	if err != nil {
+		die(err)
+	}
+	if len(recs) == 0 {
+		fmt.Printf("cronhub: no runs recorded for job %q yet\n", jobName)
+		return
+	}
+
+	// Filter to failures if asked.
+	if failedOnly {
+		var f []ports.RunRecord
+		for _, r := range recs {
+			if !r.Success {
+				f = append(f, r)
+			}
+		}
+		recs = f
+		if len(recs) == 0 {
+			fmt.Printf("cronhub: no failed runs for job %q\n", jobName)
+			return
+		}
+	}
+	if len(recs) > limit {
+		recs = recs[:limit]
+	}
+
+	// Drill-down: show the full details of one run by its number.
+	if runN > 0 {
+		if runN > len(recs) {
+			die(fmt.Errorf("run %d is out of range (only %d runs shown)", runN, len(recs)))
+		}
+		printRunDetail(jobName, runN, recs[runN-1])
+		return
+	}
+
+	// Compact table. Runs are numbered newest-first (1 = most recent).
+	fmt.Printf("Recent runs of %q (newest first):\n\n", jobName)
+	fmt.Printf("  %-3s %-20s %-8s %-10s %s\n", "#", "when", "result", "duration", "exit")
+	for i, r := range recs {
+		result := "ok"
+		if !r.Success {
+			result = "FAILED"
+		}
+		fmt.Printf("  %-3d %-20s %-8s %-10s %d\n",
+			i+1,
+			r.Started.Format("2006-01-02 15:04:05"),
+			result,
+			r.Duration.Round(time.Millisecond),
+			r.ExitCode,
+		)
+	}
+	fmt.Printf("\nSee a run's output with: cronhub history %s --run N\n", jobName)
+}
+
+func printRunDetail(jobName string, n int, r ports.RunRecord) {
+	result := "ok"
+	if !r.Success {
+		result = "FAILED"
+	}
+	fmt.Printf("Run #%d of %q\n", n, jobName)
+	fmt.Printf("  when:     %s\n", r.Started.Format("2006-01-02 15:04:05 MST"))
+	fmt.Printf("  result:   %s (exit code %d)\n", result, r.ExitCode)
+	fmt.Printf("  duration: %s\n", r.Duration.Round(time.Millisecond))
+	if r.Stdout != "" {
+		fmt.Printf("\n--- stdout ---\n%s", r.Stdout)
+		if !strings.HasSuffix(r.Stdout, "\n") {
+			fmt.Println()
+		}
+	}
+	if r.Stderr != "" {
+		fmt.Printf("\n--- stderr ---\n%s", r.Stderr)
+		if !strings.HasSuffix(r.Stderr, "\n") {
+			fmt.Println()
+		}
+	}
+	if r.Stdout == "" && r.Stderr == "" {
+		fmt.Printf("\n(no output captured)\n")
+	}
+}
+
 func mustService(systemLevel bool, action func(*svc.Adapter) error, past string) {
 	a, err := svc.New(noopRunner{}, systemLevel)
 	if err != nil {
@@ -253,7 +354,11 @@ func dbPath() string {
 // so both forms `--config x pos` and `pos --config x` parse. Known value flags:
 // --config. Boolean flags (--force, --system) need no value.
 func reorderArgs(args []string) []string {
-	valueFlags := map[string]bool{"--config": true, "-config": true}
+	valueFlags := map[string]bool{
+		"--config": true, "-config": true,
+		"--limit": true, "-limit": true,
+		"--run": true, "-run": true,
+	}
 	var flags, pos []string
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -288,11 +393,12 @@ func dieConfig(err error, cfgPath string) {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: cronhub <init|import-crontab|list|run|install|uninstall|start|stop|status> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: cronhub <init|import-crontab|list|history|run|install|uninstall|start|stop|status> [flags]")
 	fmt.Fprintln(os.Stderr, "  init                 create a starter config in the OS-native location")
 	fmt.Fprintln(os.Stderr, "  import-crontab FILE  import a classic crontab (use '-' for stdin)")
 	fmt.Fprintln(os.Stderr, "  list                 list configured jobs")
+	fmt.Fprintln(os.Stderr, "  history JOB          show recent runs of a job (--limit N, --failed, --run N)")
 	fmt.Fprintln(os.Stderr, "  run                  run the scheduler in the foreground")
 	fmt.Fprintln(os.Stderr, "  install [--system]   register with the OS service manager")
-	fmt.Fprintln(os.Stderr, "flags: --config PATH, --system, --force")
+	fmt.Fprintln(os.Stderr, "flags: --config PATH, --system, --force, --limit N, --failed, --run N")
 }
