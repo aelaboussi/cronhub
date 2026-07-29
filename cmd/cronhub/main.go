@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -54,6 +55,15 @@ func main() {
 	limit := fs.Int("limit", 10, "number of runs to show (history)")
 	failed := fs.Bool("failed", false, "show only failed runs (history)")
 	runN := fs.Int("run", 0, "show full details of run number N (history)")
+	fSchedule := fs.String("schedule", "", "job schedule (add/edit)")
+	fCommand := fs.String("command", "", "job command (add/edit)")
+	fName := fs.String("name", "", "job name (add/edit; or pass as positional)")
+	fOverlap := fs.String("on-overlap", "", "overlap policy (add/edit)")
+	fMissed := fs.String("on-missed", "", "missed-run policy (add/edit)")
+	fTimeout := fs.String("timeout", "", "job timeout, e.g. 30m (add/edit)")
+	fTimezone := fs.String("timezone", "", "job timezone (add/edit)")
+	var fNotify multiFlag
+	fs.Var(&fNotify, "notify", "notifier name (add/edit; repeatable)")
 	// Reorder so flags may appear before OR after positional args (Go's flag
 	// package otherwise stops at the first positional).
 	_ = fs.Parse(reorderArgs(os.Args[2:]))
@@ -67,6 +77,21 @@ func main() {
 		mustRun(*cfgPath)
 	case "list":
 		mustList(*cfgPath)
+	case "add":
+		nameArg := firstNonEmpty(*fName, fs.Arg(0))
+		mustAdd(*cfgPath, config.NewJobSpec{
+			Name: nameArg, Schedule: *fSchedule, Command: *fCommand,
+			OnOverlap: *fOverlap, OnMissed: *fMissed, Timeout: *fTimeout,
+			Timezone: *fTimezone, Notify: fNotify,
+		})
+	case "remove", "rm":
+		mustRemove(*cfgPath, firstNonEmpty(*fName, fs.Arg(0)))
+	case "edit":
+		mustEdit(*cfgPath, config.NewJobSpec{
+			Name: firstNonEmpty(*fName, fs.Arg(0)), Schedule: *fSchedule, Command: *fCommand,
+			OnOverlap: *fOverlap, OnMissed: *fMissed, Timeout: *fTimeout,
+			Timezone: *fTimezone, Notify: fNotify,
+		})
 	case "history":
 		mustHistory(fs.Arg(0), *limit, *failed, *runN)
 	case "install":
@@ -316,6 +341,84 @@ func printRunDetail(jobName string, n int, r ports.RunRecord) {
 	}
 }
 
+// multiFlag collects a repeatable string flag (e.g. --notify a --notify b).
+type multiFlag []string
+
+func (m *multiFlag) String() string { return strings.Join(*m, ",") }
+func (m *multiFlag) Set(v string) error {
+	*m = append(*m, v)
+	return nil
+}
+
+func firstNonEmpty(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
+}
+
+func mustAdd(cfgPath string, spec config.NewJobSpec) {
+	if spec.Name == "" || spec.Schedule == "" || spec.Command == "" {
+		die(fmt.Errorf("add needs a name, --schedule, and --command\n  e.g. cronhub add backup --schedule \"every day at 3am\" --command \"/opt/backup.sh\""))
+	}
+	// Validate the schedule before writing, so a bad one never lands in the file.
+	if _, err := schedule.NewAutoParser().Parse(spec.Schedule); err != nil {
+		die(fmt.Errorf("invalid schedule: %w", err))
+	}
+	if err := config.AddJob(cfgPath, spec); err != nil {
+		dieConfig(err, cfgPath)
+	}
+	fmt.Printf("cronhub: added job %q\n", spec.Name)
+	fmt.Println("If the scheduler is running as a service, restart it to pick up the change.")
+}
+
+func mustRemove(cfgPath, name string) {
+	if name == "" {
+		die(fmt.Errorf("usage: cronhub remove <job-name>"))
+	}
+	hadComments, err := config.RemoveJob(cfgPath, name)
+	if err != nil {
+		dieConfig(err, cfgPath)
+	}
+	fmt.Printf("cronhub: removed job %q (backup written to %s.bak)\n", name, cfgPath)
+	if hadComments {
+		fmt.Println("note: the config had comments, which are not preserved when rewriting; see the .bak file if you need them.")
+	}
+}
+
+func mustEdit(cfgPath string, spec config.NewJobSpec) {
+	if spec.Name == "" {
+		// Bare `cronhub edit` opens the config in $EDITOR.
+		openInEditor(cfgPath)
+		return
+	}
+	if spec.Schedule != "" {
+		if _, err := schedule.NewAutoParser().Parse(spec.Schedule); err != nil {
+			die(fmt.Errorf("invalid schedule: %w", err))
+		}
+	}
+	hadComments, err := config.UpdateJob(cfgPath, spec)
+	if err != nil {
+		dieConfig(err, cfgPath)
+	}
+	fmt.Printf("cronhub: updated job %q (backup written to %s.bak)\n", spec.Name, cfgPath)
+	if hadComments {
+		fmt.Println("note: the config had comments, which are not preserved when rewriting; see the .bak file if you need them.")
+	}
+}
+
+func openInEditor(cfgPath string) {
+	editor := os.Getenv("EDITOR")
+	if editor == "" {
+		editor = "vi"
+	}
+	c := exec.Command(editor, cfgPath)
+	c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
+	if err := c.Run(); err != nil {
+		die(err)
+	}
+}
+
 func mustService(systemLevel bool, action func(*svc.Adapter) error, past string) {
 	a, err := svc.New(noopRunner{}, systemLevel)
 	if err != nil {
@@ -364,6 +467,14 @@ func reorderArgs(args []string) []string {
 		"--config": true, "-config": true,
 		"--limit": true, "-limit": true,
 		"--run": true, "-run": true,
+		"--schedule": true, "-schedule": true,
+		"--command": true, "-command": true,
+		"--name": true, "-name": true,
+		"--on-overlap": true, "-on-overlap": true,
+		"--on-missed": true, "-on-missed": true,
+		"--timeout": true, "-timeout": true,
+		"--timezone": true, "-timezone": true,
+		"--notify": true, "-notify": true,
 	}
 	var flags, pos []string
 	for i := 0; i < len(args); i++ {
@@ -399,10 +510,13 @@ func dieConfig(err error, cfgPath string) {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: cronhub <init|import-crontab|list|history|run|install|uninstall|start|stop|status> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: cronhub <init|import-crontab|list|add|edit|remove|history|run|install|uninstall|start|stop|status|version> [flags]")
 	fmt.Fprintln(os.Stderr, "  init                 create a starter config in the OS-native location")
 	fmt.Fprintln(os.Stderr, "  import-crontab FILE  import a classic crontab (use '-' for stdin)")
 	fmt.Fprintln(os.Stderr, "  list                 list configured jobs")
+	fmt.Fprintln(os.Stderr, "  add NAME             add a job (--schedule, --command, and optional --notify etc.)")
+	fmt.Fprintln(os.Stderr, "  edit [NAME]          edit a job's fields, or open the config in $EDITOR")
+	fmt.Fprintln(os.Stderr, "  remove NAME          remove a job (writes a .bak first)")
 	fmt.Fprintln(os.Stderr, "  history JOB          show recent runs of a job (--limit N, --failed, --run N)")
 	fmt.Fprintln(os.Stderr, "  run                  run the scheduler in the foreground")
 	fmt.Fprintln(os.Stderr, "  install [--system]   register with the OS service manager")

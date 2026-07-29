@@ -17,6 +17,7 @@ anything.
 
 - [Install](#install)
 - [First run](#first-run)
+- [Managing jobs](#managing-jobs)
 - [Writing schedules](#writing-schedules)
 - [The config file](#the-config-file)
 - [Notifications](#notifications)
@@ -114,6 +115,57 @@ crontab -l | cronhub import-crontab -
 
 That reads your current crontab, converts every job into a cronhub job, and
 writes the config for you. Review it with `cronhub list` and you're done.
+
+## Managing jobs
+
+You can edit the config file directly, or manage jobs from the command line
+without opening it.
+
+Add a job:
+
+```sh
+cronhub add backup --schedule "every day at 3am" --command "/opt/backup.sh"
+```
+
+Add with options (repeat `--notify` for several notifiers):
+
+```sh
+cronhub add report \
+  --schedule "every monday at 8am" \
+  --command "/opt/report.sh" \
+  --timeout 10m \
+  --notify log --notify alerts
+```
+
+`add` appends the new job to the end of your config and leaves everything else
+exactly as it was — including any comments you've written. It checks the schedule
+is valid and refuses to add a duplicate name before writing anything.
+
+Change a job:
+
+```sh
+cronhub edit backup --schedule "every day at 6am" --timeout 30m
+```
+
+Only the fields you pass are changed; the rest stay as they were. Or open the
+whole config in your editor:
+
+```sh
+cronhub edit          # opens the config in $EDITOR
+```
+
+Remove a job:
+
+```sh
+cronhub remove backup
+```
+
+`edit` and `remove` have to rewrite the file, so they save a backup next to it
+(`cronhub.toml.bak`) first, and they'll tell you if the file had comments (which
+aren't preserved on a rewrite — the backup keeps them if you need them).
+
+If the scheduler is running as a service, restart it to pick up changes:
+`cronhub stop && cronhub start`.
 
 ## Writing schedules
 
@@ -359,6 +411,9 @@ sudo cronhub install --system
 cronhub init                    create a starter config file
 cronhub import-crontab FILE     import an existing crontab (use "-" for stdin)
 cronhub list                    show all jobs and their next run time
+cronhub add NAME                add a job (--schedule, --command, --notify, ...)
+cronhub edit [NAME]             change a job's fields, or open the config in $EDITOR
+cronhub remove NAME             remove a job (writes a .bak first)
 cronhub history JOB             show recent runs of a job (--limit, --failed, --run)
 cronhub run                     run the scheduler in the foreground
 cronhub install                 register as a background service
