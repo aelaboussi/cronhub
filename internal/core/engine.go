@@ -67,6 +67,29 @@ func (e *Engine) Run(ctx context.Context) error {
 		scheds = append(scheds, &scheduled{job: j, sch: sch, next: sch.Next(now)})
 	}
 
+	// Catch-up pass: a job with on_missed = catch_up_once that missed one or more
+	// scheduled times while the daemon was down runs ONCE now, then resumes its
+	// normal schedule. Jobs with on_missed = skip (the default) are untouched.
+	// A job that has never run has nothing to catch up to and is left alone.
+	for _, s := range scheds {
+		if s.job.OnMissed != ports.MissedCatchUpOnce {
+			continue
+		}
+		recs, err := e.deps.Store.ReadHistory(s.job.Name, 1)
+		if err != nil || len(recs) == 0 {
+			continue // never run before (or store error): nothing to catch up
+		}
+		lastRun := recs[0].Started
+		// If the next scheduled time after the last run has already passed, a
+		// run was missed. Run once now to make up for it.
+		if missedAt := s.sch.Next(lastRun); missedAt.Before(now) {
+			log.Printf("job %q: missed a scheduled run (due %s); catching up once now",
+				s.job.Name, missedAt.Format(time.RFC3339))
+			s.last = missedAt
+			e.launch(ctx, s.job)
+		}
+	}
+
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 

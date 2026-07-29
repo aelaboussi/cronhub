@@ -35,8 +35,8 @@ type MissedMode string
 
 const (
 	MissedSkip        MissedMode = "skip"          // v1 default
-	MissedCatchUpOnce MissedMode = "catch_up_once" // roadmap
-	MissedCatchUpAll  MissedMode = "catch_up_all"  // roadmap
+	MissedCatchUpOnce MissedMode = "catch_up_once" // run once now if any were missed
+	MissedCatchUpAll  MissedMode = "catch_up_all"  // roadmap: replay every missed run
 )
 
 // RunResult is the outcome the Executor reports for a single execution.

@@ -259,10 +259,11 @@ on_overlap = "skip"        # what to do if the previous run is still going
                            # other values (queue, parallel, kill) are planned
                            # but not implemented yet.
 
-on_missed  = "skip"        # what to do about runs that were missed while the
-                           # machine was off or asleep. default: "skip"
-                           # (missed runs are not replayed). catch-up options
-                           # are planned but not implemented yet.
+on_missed  = "skip"        # what to do about a run that was due while the
+                           # machine was off or asleep. default: "skip".
+                           # "catch_up_once" runs the job once when cronhub
+                           # starts back up if it missed one or more scheduled
+                           # times, then resumes the normal schedule.
 
 timeout    = "30m"         # kill the job if it runs longer than this.
                            # accepts things like "30s", "10m", "2h".
@@ -496,8 +497,9 @@ design, is in [ARCHITECTURE.md](./ARCHITECTURE.md).
 
 ## Contributing
 
-Contributions are welcome. The easiest places to start are the parts that are
-designed to grow:
+Contributions are welcome. If you're looking for somewhere to start, the
+[good first issues](https://github.com/aelaboussi/cronhub/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)
+are picked to be self-contained, and the areas below are all designed to grow:
 
 - **A new notification type.** Look at `internal/notifier/webhook.go` — it's
   about 40 lines. Email, Discord, desktop notifications, and others would all
