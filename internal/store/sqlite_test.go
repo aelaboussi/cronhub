@@ -79,3 +79,104 @@ func TestSaveLoadAndHistory(t *testing.T) {
 		t.Errorf("limit not respected: got %d", len(hist2))
 	}
 }
+
+func TestRunningState(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "run.db")
+	st, err := Open(dbFile)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer st.Close()
+
+	// nothing running initially
+	r, err := st.ListRunning()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r) != 0 {
+		t.Fatalf("expected 0 running, got %d", len(r))
+	}
+
+	start := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	if err := st.MarkRunning("job1", start); err != nil {
+		t.Fatal(err)
+	}
+	r, _ = st.ListRunning()
+	if len(r) != 1 || r[0].JobName != "job1" || !r[0].StartedAt.Equal(start) {
+		t.Fatalf("running state wrong: %+v", r)
+	}
+
+	// marking again updates rather than duplicating
+	if err := st.MarkRunning("job1", start.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	r, _ = st.ListRunning()
+	if len(r) != 1 {
+		t.Fatalf("mark should upsert, got %d rows", len(r))
+	}
+
+	if err := st.ClearRunning("job1"); err != nil {
+		t.Fatal(err)
+	}
+	r, _ = st.ListRunning()
+	if len(r) != 0 {
+		t.Fatalf("expected cleared, got %d", len(r))
+	}
+}
+
+// TestConcurrentAccess simulates the daemon (writer) and `status` (reader)
+// hitting the same database at once, which previously produced SQLITE_BUSY.
+// With WAL + busy_timeout + a single connection, it should not error.
+func TestConcurrentAccess(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "concurrent.db")
+	st, err := Open(dbFile)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer st.Close()
+	if err := st.SaveJob(ports.Job{Name: "j", Schedule: "* * * * *", Command: "x", OnOverlap: ports.OverlapSkip, OnMissed: ports.MissedSkip, Timezone: "UTC", Notify: []string{"log"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 2)
+
+	// writer: mark running, record runs, clear running, repeatedly
+	go func() {
+		for i := 0; i < 200; i++ {
+			if err := st.MarkRunning("j", time.Now()); err != nil {
+				done <- err
+				return
+			}
+			if err := st.RecordRun(ports.RunRecord{JobName: "j", Started: time.Now(), Success: true}); err != nil {
+				done <- err
+				return
+			}
+			if err := st.ClearRunning("j"); err != nil {
+				done <- err
+				return
+			}
+		}
+		done <- nil
+	}()
+
+	// reader: list running and read history, repeatedly (like `status --watch`)
+	go func() {
+		for i := 0; i < 200; i++ {
+			if _, err := st.ListRunning(); err != nil {
+				done <- err
+				return
+			}
+			if _, err := st.ReadHistory("j", 5); err != nil {
+				done <- err
+				return
+			}
+		}
+		done <- nil
+	}()
+
+	for i := 0; i < 2; i++ {
+		if err := <-done; err != nil {
+			t.Fatalf("concurrent access errored (SQLITE_BUSY not fixed?): %v", err)
+		}
+	}
+}

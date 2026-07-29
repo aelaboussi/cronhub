@@ -20,6 +20,8 @@ anything.
 - [Managing jobs](#managing-jobs)
 - [Writing schedules](#writing-schedules)
 - [The config file](#the-config-file)
+- [Seeing what's happening now](#seeing-whats-happening-now)
+- [Seeing what happened](#seeing-what-happened)
 - [Notifications](#notifications)
 - [Running as a background service](#running-as-a-background-service)
 - [All commands](#all-commands)
@@ -334,6 +336,36 @@ accept this format directly.
 If a job's `notify` list names a notifier you didn't declare, cronhub refuses to
 start and tells you which one is missing — it won't quietly drop your alerts.
 
+## Seeing what's happening now
+
+`cronhub status` is a live dashboard: for every job it shows whether it's running
+right now, when it last ran and whether that succeeded, and when it runs next.
+
+```sh
+cronhub status
+```
+
+```
+  job                  state              last run            next run
+  heartbeat            RUNNING (3s)       Wed 14:23 (ok)      Wed 14:25
+  nightly-backup       idle               Thu 03:00 (ok)      Fri 03:00
+  report               idle               never               Mon 08:00
+```
+
+Add `--watch` to refresh it every couple of seconds and watch the scheduler work:
+
+```sh
+cronhub status --watch
+```
+
+If a job shows as `unknown (stuck ...)`, it means a run has been in progress far
+longer than it should — usually because the scheduler was killed mid-run and left
+a stale marker. It's cronhub telling you it isn't sure rather than pretending the
+job is fine.
+
+(To check whether cronhub is installed and running *as a service*, use
+`cronhub service-status`.)
+
 ## Seeing what happened
 
 cronhub records every run — when it happened, whether it succeeded, how long it
@@ -392,7 +424,7 @@ it just registers itself with them.
 ```sh
 cronhub install        # install as a service for your user (no admin needed)
 cronhub start          # start it
-cronhub status         # check whether it's running
+cronhub service-status # check whether it's running
 cronhub stop           # stop it
 cronhub uninstall      # remove it
 ```
@@ -415,12 +447,13 @@ cronhub add NAME                add a job (--schedule, --command, --notify, ...)
 cronhub edit [NAME]             change a job's fields, or open the config in $EDITOR
 cronhub remove NAME             remove a job (writes a .bak first)
 cronhub history JOB             show recent runs of a job (--limit, --failed, --run)
+cronhub status                  live dashboard: running now, last run, next run (--watch)
 cronhub run                     run the scheduler in the foreground
 cronhub install                 register as a background service
 cronhub uninstall               remove the background service
 cronhub start                   start the installed service
 cronhub stop                    stop the installed service
-cronhub status                  show whether the service is running
+cronhub service-status          show whether the service is running
 cronhub version                 print the cronhub version
 ```
 

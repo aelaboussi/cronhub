@@ -60,7 +60,21 @@ type Store interface {
 	LoadJobs() ([]Job, error)
 	RecordRun(rec RunRecord) error
 	ReadHistory(jobName string, limit int) ([]RunRecord, error)
+
+	// Live run state, used by `status`. The engine marks a job running when it
+	// launches and clears it when the job finishes, so a separate `status`
+	// process can see what is executing right now by reading the store.
+	MarkRunning(jobName string, startedAt time.Time) error
+	ClearRunning(jobName string) error
+	ListRunning() ([]RunningJob, error)
+
 	Close() error
+}
+
+// RunningJob is a job currently executing, as seen via the store.
+type RunningJob struct {
+	JobName   string
+	StartedAt time.Time
 }
 
 // Notifier reports a run outcome. The log notifier is always available; others are declared in config.

@@ -109,10 +109,20 @@ func (e *Engine) Run(ctx context.Context) error {
 
 func (e *Engine) launch(ctx context.Context, job ports.Job) {
 	e.setRunning(job.Name, true)
+	// Record live run state so a separate `status` process can see this job is
+	// executing right now. Best-effort: a failure here shouldn't stop the run.
+	if err := e.deps.Store.MarkRunning(job.Name, time.Now()); err != nil {
+		log.Printf("job %q: failed to mark running: %v", job.Name, err)
+	}
 	e.wg.Add(1)
 	go func() {
 		defer e.wg.Done()
 		defer e.setRunning(job.Name, false)
+		defer func() {
+			if err := e.deps.Store.ClearRunning(job.Name); err != nil {
+				log.Printf("job %q: failed to clear running: %v", job.Name, err)
+			}
+		}()
 
 		res := e.deps.Executor.Run(ctx, job)
 

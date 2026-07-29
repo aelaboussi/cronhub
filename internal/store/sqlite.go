@@ -23,6 +23,26 @@ func Open(path string) (*SQLite, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Serialize access through a single connection. For a scheduler this is
+	// plenty of throughput, and it makes the per-connection busy_timeout below
+	// deterministic (Go's sql pool would otherwise apply PRAGMAs to whichever
+	// pooled connection served the call).
+	db.SetMaxOpenConns(1)
+	// WAL mode lets readers (e.g. `cronhub status`) and the writer (the running
+	// daemon) work at the same time without blocking each other. busy_timeout
+	// makes a connection wait up to 5s for a lock instead of failing instantly
+	// with SQLITE_BUSY. Applied as explicit PRAGMAs so it works regardless of
+	// driver DSN quirks.
+	for _, pragma := range []string{
+		"PRAGMA journal_mode=WAL;",
+		"PRAGMA busy_timeout=5000;",
+		"PRAGMA synchronous=NORMAL;",
+	} {
+		if _, err := db.Exec(pragma); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
+	}
 	s := &SQLite{db: db}
 	if err := s.migrate(); err != nil {
 		_ = db.Close()
@@ -53,7 +73,11 @@ CREATE TABLE IF NOT EXISTS runs (
 	stdout      TEXT,
 	stderr      TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_runs_job ON runs(job_name, started DESC);`)
+CREATE INDEX IF NOT EXISTS idx_runs_job ON runs(job_name, started DESC);
+CREATE TABLE IF NOT EXISTS running (
+	job_name   TEXT PRIMARY KEY,
+	started_at INTEGER NOT NULL   -- unix nanoseconds
+);`)
 	if err != nil {
 		return err
 	}
@@ -175,6 +199,39 @@ FROM runs WHERE job_name = ? ORDER BY started DESC LIMIT ?`, jobName, limit)
 		recs = append(recs, r)
 	}
 	return recs, rows.Err()
+}
+
+func (s *SQLite) MarkRunning(jobName string, startedAt time.Time) error {
+	_, err := s.db.Exec(`
+INSERT INTO running (job_name, started_at) VALUES (?, ?)
+ON CONFLICT(job_name) DO UPDATE SET started_at=excluded.started_at`,
+		jobName, startedAt.UnixNano())
+	return err
+}
+
+func (s *SQLite) ClearRunning(jobName string) error {
+	_, err := s.db.Exec(`DELETE FROM running WHERE job_name = ?`, jobName)
+	return err
+}
+
+func (s *SQLite) ListRunning() ([]ports.RunningJob, error) {
+	rows, err := s.db.Query(`SELECT job_name, started_at FROM running`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []ports.RunningJob
+	for rows.Next() {
+		var r ports.RunningJob
+		var ns int64
+		if err := rows.Scan(&r.JobName, &ns); err != nil {
+			return nil, err
+		}
+		r.StartedAt = time.Unix(0, ns).UTC()
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 func (s *SQLite) Close() error { return s.db.Close() }

@@ -64,6 +64,7 @@ func main() {
 	fTimezone := fs.String("timezone", "", "job timezone (add/edit)")
 	var fNotify multiFlag
 	fs.Var(&fNotify, "notify", "notifier name (add/edit; repeatable)")
+	watch := fs.Bool("watch", false, "refresh the status view every 2s")
 	// Reorder so flags may appear before OR after positional args (Go's flag
 	// package otherwise stops at the first positional).
 	_ = fs.Parse(reorderArgs(os.Args[2:]))
@@ -103,6 +104,8 @@ func main() {
 	case "stop":
 		mustService(*systemLevel, func(a *svc.Adapter) error { return a.Stop() }, "stopped")
 	case "status":
+		mustJobStatus(*cfgPath, *watch)
+	case "service-status":
 		mustStatus(*systemLevel)
 	case "version", "--version", "-v":
 		fmt.Printf("cronhub %s\n", version)
@@ -223,6 +226,123 @@ func mustRun(cfgPath string) {
 	fmt.Println("cronhub: scheduler running")
 	if err := eng.Run(ctx); err != nil && err != context.Canceled {
 		die(err)
+	}
+}
+
+// mustJobStatus renders the live dashboard: for each job, whether it's running
+// now, its last completed run, and its next scheduled run. With watch=true it
+// refreshes on an interval.
+func mustJobStatus(cfgPath string, watch bool) {
+	render := func() error {
+		jobs, err := config.Load(cfgPath)
+		if err != nil {
+			return err
+		}
+		st, err := store.Open(dbPath())
+		if err != nil {
+			return err
+		}
+		defer st.Close()
+
+		running, err := st.ListRunning()
+		if err != nil {
+			return err
+		}
+		runningSince := map[string]time.Time{}
+		for _, r := range running {
+			runningSince[r.JobName] = r.StartedAt
+		}
+
+		parser := schedule.NewAutoParser()
+		now := time.Now()
+
+		if watch {
+			// Home the cursor and clear from there down. Combined with the
+			// alternate screen buffer (entered in the watch loop below), this
+			// redraws in place without touching the user's real scrollback.
+			fmt.Print("\033[H\033[J")
+			fmt.Printf("cronhub status — %s (refreshing; Ctrl+C to stop)\n\n", now.Format("15:04:05"))
+		}
+		fmt.Printf("  %-20s %-24s %-22s %s\n", "job", "state", "last run", "next run")
+		for _, j := range jobs {
+			// next run
+			next := "—"
+			if sched, perr := parser.Parse(j.Schedule); perr == nil {
+				next = sched.Next(now).Format("Mon 15:04")
+			}
+
+			// state: running (with staleness guard) or idle
+			state := "idle"
+			if since, ok := runningSince[j.Name]; ok {
+				elapsed := now.Sub(since)
+				// Staleness guard: if a run has been "in progress" far longer
+				// than it plausibly should, the daemon likely died mid-run and
+				// left a ghost. Show uncertainty rather than a confident lie.
+				limit := j.Timeout
+				if limit == 0 {
+					limit = 6 * time.Hour // hard ceiling when no timeout is set
+				}
+				if elapsed > limit {
+					state = fmt.Sprintf("unknown (stuck %s?)", elapsed.Round(time.Second))
+				} else {
+					state = fmt.Sprintf("RUNNING (%s)", elapsed.Round(time.Second))
+				}
+			}
+
+			// last completed run
+			last := "never"
+			if recs, herr := st.ReadHistory(j.Name, 1); herr == nil && len(recs) > 0 {
+				r := recs[0]
+				result := "ok"
+				if !r.Success {
+					result = "FAILED"
+				}
+				last = fmt.Sprintf("%s (%s)", r.Started.Local().Format("Mon 15:04"), result)
+			}
+
+			fmt.Printf("  %-20s %-24s %-22s %s\n", j.Name, state, last, next)
+		}
+		return nil
+	}
+
+	if !watch {
+		if err := render(); err != nil {
+			dieConfig(err, cfgPath)
+		}
+		return
+	}
+
+	// watch mode: use the terminal's alternate screen buffer (like top/htop/less)
+	// so the live view is drawn on a separate screen and exiting — including via
+	// Ctrl+C — restores the user's terminal exactly as it was, with their
+	// scrollback intact.
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+
+	enterAlt := func() { fmt.Print("\033[?1049h\033[H") } // switch to alt screen, home
+	leaveAlt := func() { fmt.Print("\033[?1049l") }       // switch back to normal screen
+
+	enterAlt()
+	// Guarantee restoration even if something panics.
+	defer leaveAlt()
+
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	if err := render(); err != nil {
+		leaveAlt()
+		dieConfig(err, cfgPath)
+	}
+	for {
+		select {
+		case <-sig:
+			leaveAlt()
+			return
+		case <-ticker.C:
+			if err := render(); err != nil {
+				leaveAlt()
+				die(err)
+			}
+		}
 	}
 }
 
@@ -510,7 +630,7 @@ func dieConfig(err error, cfgPath string) {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: cronhub <init|import-crontab|list|add|edit|remove|history|run|install|uninstall|start|stop|status|version> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: cronhub <init|import-crontab|list|add|edit|remove|history|status|run|install|uninstall|start|stop|service-status|version> [flags]")
 	fmt.Fprintln(os.Stderr, "  init                 create a starter config in the OS-native location")
 	fmt.Fprintln(os.Stderr, "  import-crontab FILE  import a classic crontab (use '-' for stdin)")
 	fmt.Fprintln(os.Stderr, "  list                 list configured jobs")
@@ -518,6 +638,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  edit [NAME]          edit a job's fields, or open the config in $EDITOR")
 	fmt.Fprintln(os.Stderr, "  remove NAME          remove a job (writes a .bak first)")
 	fmt.Fprintln(os.Stderr, "  history JOB          show recent runs of a job (--limit N, --failed, --run N)")
+	fmt.Fprintln(os.Stderr, "  status               live dashboard: what's running, last run, next run (--watch)")
 	fmt.Fprintln(os.Stderr, "  run                  run the scheduler in the foreground")
 	fmt.Fprintln(os.Stderr, "  install [--system]   register with the OS service manager")
 	fmt.Fprintln(os.Stderr, "  version              print the cronhub version")
