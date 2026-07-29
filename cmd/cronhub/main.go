@@ -37,6 +37,10 @@ import (
 	"github.com/aelaboussi/cronhub/internal/store"
 )
 
+// version is set at build time with -ldflags "-X main.version=vX.Y.Z".
+// It defaults to "dev" for local builds.
+var version = "dev"
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()
@@ -75,6 +79,8 @@ func main() {
 		mustService(*systemLevel, func(a *svc.Adapter) error { return a.Stop() }, "stopped")
 	case "status":
 		mustStatus(*systemLevel)
+	case "version", "--version", "-v":
+		fmt.Printf("cronhub %s\n", version)
 	default:
 		usage()
 		os.Exit(2)
@@ -400,5 +406,6 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  history JOB          show recent runs of a job (--limit N, --failed, --run N)")
 	fmt.Fprintln(os.Stderr, "  run                  run the scheduler in the foreground")
 	fmt.Fprintln(os.Stderr, "  install [--system]   register with the OS service manager")
+	fmt.Fprintln(os.Stderr, "  version              print the cronhub version")
 	fmt.Fprintln(os.Stderr, "flags: --config PATH, --system, --force, --limit N, --failed, --run N")
 }

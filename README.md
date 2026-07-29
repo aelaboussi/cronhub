@@ -29,7 +29,39 @@ anything.
 
 ## Install
 
-You need Go 1.22 or newer. Build the binary:
+The quickest way, on macOS or Linux:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/aelaboussi/cronhub/main/install.sh | sh
+```
+
+This downloads the right binary for your system and installs it. If you'd rather
+not pipe a script into your shell (fair), read on for the manual options.
+
+### Download a binary
+
+Grab the binary for your platform from the
+[latest release](https://github.com/aelaboussi/cronhub/releases/latest):
+
+- macOS Apple Silicon: `cronhub-darwin-arm64`
+- macOS Intel: `cronhub-darwin-amd64`
+- Linux x86-64: `cronhub-linux-amd64`
+- Linux ARM64: `cronhub-linux-arm64`
+- Windows: `cronhub-windows-amd64.exe`
+
+Make it executable and put it on your PATH:
+
+```sh
+chmod +x cronhub-darwin-arm64
+sudo mv cronhub-darwin-arm64 /usr/local/bin/cronhub
+cronhub --version
+```
+
+Each release also publishes `checksums.txt` so you can verify your download.
+
+### Build from source
+
+If you have Go 1.22 or newer:
 
 ```sh
 git clone https://github.com/aelaboussi/cronhub.git
@@ -334,6 +366,7 @@ cronhub uninstall               remove the background service
 cronhub start                   start the installed service
 cronhub stop                    stop the installed service
 cronhub status                  show whether the service is running
+cronhub version                 print the cronhub version
 ```
 
 Flags that apply to most commands:
